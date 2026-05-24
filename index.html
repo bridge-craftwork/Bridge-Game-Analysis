@@ -211,10 +211,10 @@ tr.clickable-row:hover td { background: #e0e7ff; }
 
   <!-- Upload (only shown on the / route) -->
   <div id="upload-area" class="upload-area">
-    <p>Upload your game files from ACBLscore/ACBLlive<br>
-    <small>Select both the .BWS and .PBN files together (hold Cmd/Ctrl to multi-select)</small></p>
+    <p>Upload your game files<br>
+    <small>ACBLscore/ACBLlive: select both .BWS and .PBN together (hold Cmd/Ctrl). EBU/USEBIO: drop the .XML file.</small></p>
     <label class="btn" for="file-input">Choose Files</label>
-    <input type="file" id="file-input" multiple accept=".bws,.pbn,.BWS,.PBN">
+    <input type="file" id="file-input" multiple accept=".bws,.pbn,.xml,.BWS,.PBN,.XML">
     <div id="file-names" style="margin-top:0.5rem;color:var(--text-muted);font-size:0.85rem;"></div>
   </div>
 
@@ -1616,11 +1616,291 @@ uploadArea.addEventListener('drop', e => {
   if (files.length) { fileNames.textContent = files.map(f => f.name).join(', '); doUpload(files); }
 });
 
+// ==================== USEBIO XML adapter ====================
+// Parses an EBU USEBIO 1.x XML document (https://www.usebio.org/) into the
+// normalized JSON envelope. Runs entirely client-side — no backend needed.
+
+function parseUsebioXml(xmlString, sourceName) {
+  const doc = new DOMParser().parseFromString(xmlString, 'text/xml');
+  const parseErr = doc.querySelector('parsererror');
+  if (parseErr) throw new Error('Invalid XML: ' + parseErr.textContent.split('\n')[0]);
+  const root = doc.documentElement;
+  if (!root || root.nodeName.toUpperCase() !== 'USEBIO') {
+    throw new Error('Not a USEBIO file (root element must be <USEBIO>)');
+  }
+  const evEl = root.querySelector('EVENT');
+  if (!evEl) throw new Error('USEBIO file has no <EVENT> element');
+
+  const eventName = _usebioText(evEl.querySelector('EVENT_DESCRIPTION'))
+                 || _usebioText(evEl.querySelector('TITLE'))
+                 || _usebioText(evEl.querySelector('TOURNAMENT_DESCRIPTION'))
+                 || 'USEBIO Event';
+  const date = _usebioParseDate(evEl);
+  const scoring = _usebioScoring(_usebioText(evEl.querySelector('SCORING_METHOD')));
+  const pairPlayers = _usebioPairPlayersMap(evEl);
+
+  // Walk every BOARD under EVENT (any nesting depth) and merge traveller
+  // lines from different SECTIONs that share the same BOARD_NUMBER.
+  const boardsMap = new Map();
+  for (const bEl of evEl.querySelectorAll('BOARD')) {
+    const num = parseInt(_usebioText(bEl.querySelector('BOARD_NUMBER')), 10);
+    if (!Number.isFinite(num)) continue;
+    if (!boardsMap.has(num)) boardsMap.set(num, _usebioBoardSkeleton(bEl, num));
+    const board = boardsMap.get(num);
+    for (const line of bEl.querySelectorAll('TRAVELLER_LINE')) {
+      board.results.push(_usebioBuildResult(line, pairPlayers));
+    }
+  }
+  const boards = [...boardsMap.values()].sort((a, b) => a.number - b.number);
+
+  const session = { session_number: 1, boards };
+  const event = {
+    event_id: _usebioText(evEl.querySelector('EVENT_ID')) ||
+              _usebioText(evEl.querySelector('EVENT_IDENTIFIER')) || null,
+    event_type: _usebioEventType(evEl.getAttribute('EVENT_TYPE')),
+    name: eventName,
+    date,
+    scoring,
+    sessions: [session],
+  };
+  const tournament = {
+    sanction: _usebioText(evEl.querySelector('AUTH_ORG')) || null,
+    schedule_url: null,
+    name: eventName,
+    events: [event],
+  };
+  return {
+    schema_version: '1.0',
+    source: 'usebio',
+    fetched_at: new Date().toISOString(),
+    source_url: sourceName || null,
+    tournaments: [tournament],
+  };
+}
+
+function _usebioText(el) { return el ? el.textContent.trim() : ''; }
+
+function _usebioParseDate(evEl) {
+  const dateStr = _usebioText(evEl.querySelector('DATE'));
+  if (dateStr) {
+    if (/^\d{4}-\d{2}-\d{2}/.test(dateStr)) return dateStr.slice(0, 10);
+    // EBU convention is DD/MM/YYYY
+    const m = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  }
+  const y = _usebioText(evEl.querySelector('DATE_YEAR'));
+  const m = _usebioText(evEl.querySelector('DATE_MONTH'));
+  const d = _usebioText(evEl.querySelector('DATE_DAY'));
+  if (y && m && d) return `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;
+  return null;
+}
+
+function _usebioScoring(method) {
+  const m = (method || '').toUpperCase();
+  if (m.includes('IMP')) return 'imps';
+  if (m.includes('AGG')) return 'aggregate';
+  return 'matchpoints';
+}
+
+function _usebioEventType(attr) {
+  switch ((attr || '').toUpperCase()) {
+    case 'SWISS_TEAMS': case 'TEAMS_OF_FOUR': case 'TEAMS': case 'KO': return 'team';
+    case 'INDIVIDUAL': return 'individual';
+    default: return 'open_pairs';
+  }
+}
+
+function _usebioPairPlayersMap(evEl) {
+  // Keyed by "NS:1" / "EW:5" if direction is on the PAIR, else just "1" / "5".
+  const map = new Map();
+  for (const pairEl of evEl.querySelectorAll('PARTICIPANTS PAIR, PARTICIPANTS PLAYER, SECTION PAIR')) {
+    if (pairEl.nodeName.toUpperCase() === 'PLAYER') continue; // skip stray player rows
+    const num = _usebioText(pairEl.querySelector('PAIR_NUMBER'));
+    const dir = _usebioText(pairEl.querySelector('DIRECTION'));
+    if (!num) continue;
+    const players = Array.from(pairEl.querySelectorAll('PLAYER')).map(pEl => ({
+      name: _usebioText(pEl.querySelector('PLAYER_NAME')) || _usebioText(pEl.querySelector('FULL_NAME')) || '',
+      id: _usebioText(pEl.querySelector('NATIONAL_ID_NUMBER')) || null,
+    }));
+    if (dir) map.set(`${dir}:${num}`, players);
+    else map.set(num, players);
+  }
+  return map;
+}
+
+function _usebioGetPlayers(map, dir, pairNum) {
+  const list = map.get(`${dir}:${pairNum}`) || map.get(String(pairNum)) || [];
+  while (list.length < 2) list.push({ name: '', id: null });
+  return list.slice(0, 2);
+}
+
+function _usebioBoardSkeleton(bEl, num) {
+  return {
+    number: num,
+    dealer: _usebioInferDealer(num),
+    vulnerability: _usebioVuln(_usebioText(bEl.querySelector('VULNERABILITY')), num),
+    deal: _usebioBuildDeal(bEl),
+    double_dummy: null,
+    par: [],
+    results: [],
+  };
+}
+
+// Bridge dealer rotation: board 1 N, 2 E, 3 S, 4 W, cycle.
+function _usebioInferDealer(n) { return ['N','E','S','W'][(n - 1) % 4]; }
+
+// Standard 16-board vulnerability rotation. Used when VULNERABILITY is empty.
+const _USEBIO_VUL = ['None','NS','EW','Both','NS','EW','Both','None','EW','Both','None','NS','Both','None','NS','EW'];
+function _usebioVuln(s, n) {
+  const lower = (s || '').trim().toLowerCase();
+  if (lower === 'love' || lower === 'none' || lower === '-' || lower === '0') return 'None';
+  if (lower === 'all' || lower === 'both') return 'Both';
+  if (lower === 'ns' || lower === 'n/s') return 'NS';
+  if (lower === 'ew' || lower === 'e/w') return 'EW';
+  return _USEBIO_VUL[(n - 1) % 16] || 'None';
+}
+
+function _usebioBuildDeal(bEl) {
+  const handEls = bEl.querySelectorAll('HAND');
+  if (!handEls.length) return null;
+  const deal = {};
+  for (const hEl of handEls) {
+    const dir = _usebioText(hEl.querySelector('DIRECTION'));
+    if (!['N','S','E','W'].includes(dir)) continue;
+    deal[dir] = {
+      S: _usebioCards(_usebioText(hEl.querySelector('SPADES'))),
+      H: _usebioCards(_usebioText(hEl.querySelector('HEARTS'))),
+      D: _usebioCards(_usebioText(hEl.querySelector('DIAMONDS'))),
+      C: _usebioCards(_usebioText(hEl.querySelector('CLUBS'))),
+    };
+  }
+  for (const d of ['N','S','E','W']) if (!deal[d]) return null;
+  return deal;
+}
+
+// Decode a USEBIO suit string ("AKQT54" or "AKQ1054") into a card-rank array.
+function _usebioCards(s) {
+  if (!s) return [];
+  const cards = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '1' && s[i+1] === '0') { cards.push('10'); i++; }
+    else if (s[i] === 'T' || s[i] === 't') cards.push('10');
+    else if (/[2-9AKQJ]/i.test(s[i])) cards.push(s[i].toUpperCase());
+  }
+  return cards;
+}
+
+function _usebioBuildResult(line, pairPlayers) {
+  const nsNum = _usebioText(line.querySelector('NS_PAIR_NUMBER'));
+  const ewNum = _usebioText(line.querySelector('EW_PAIR_NUMBER'));
+  const contract = _usebioContract(_usebioText(line.querySelector('CONTRACT')));
+  const declarer = _usebioDeclarer(_usebioText(line.querySelector('PLAYED_BY')));
+  const tricksRaw = parseInt(_usebioText(line.querySelector('TRICKS')), 10);
+  const tricks = Number.isFinite(tricksRaw) ? tricksRaw : null;
+  const score = _usebioScore(_usebioText(line.querySelector('SCORE')),
+                             _usebioText(line.querySelector('EW_SCORE')));
+  const nsMP = parseFloat(_usebioText(line.querySelector('NS_MATCH_POINTS')));
+  const nsImp = parseFloat(_usebioText(line.querySelector('NS_CROSS_IMP_POINTS')));
+  const pct = parseFloat(_usebioText(line.querySelector('PERCENTAGE')));
+
+  const nsPlayers = _usebioGetPlayers(pairPlayers, 'NS', nsNum);
+  const ewPlayers = _usebioGetPlayers(pairPlayers, 'EW', ewNum);
+  const mkPair = (num, players) => ({
+    number: parseInt(num, 10) || null,
+    section: null,
+    strat: null,
+    strat_ranks: [],
+    players: players.map(p => ({
+      name: p.name,
+      acbl_id: null,
+      external_ids: p.id ? { usebio: p.id } : {},
+      masterpoints_earned: [],
+    })),
+  });
+  return {
+    contract,
+    declarer,
+    tricks,
+    score,
+    matchpoints: Number.isFinite(nsMP) ? nsMP : null,
+    percentage: Number.isFinite(pct) ? pct : null,
+    imps: Number.isFinite(nsImp) ? nsImp : null,
+    ns_pair: mkPair(nsNum, nsPlayers),
+    ew_pair: mkPair(ewNum, ewPlayers),
+    auction: _usebioAuction(line.querySelector('AUCTION')),
+    play: null,
+    handviewer_url: null,
+  };
+}
+
+function _usebioContract(s) {
+  const t = (s || '').trim().toUpperCase().replace(/\s+/g, '');
+  if (!t || t === 'PASS' || t === 'ALLPASS' || t === 'AP') return 'PASS';
+  // Normalize Unicode suit symbols if any
+  return t.replace('♠','S').replace('♥','H').replace('♦','D').replace('♣','C').replace(/^(\d)NT$/, '$1NT');
+}
+
+function _usebioDeclarer(s) {
+  const t = (s || '').trim().toUpperCase();
+  return ['N','S','E','W'].includes(t) ? t : null;
+}
+
+function _usebioScore(scoreText, ewScoreText) {
+  if (scoreText) {
+    const n = parseInt(scoreText.replace(/[+,\s]/g, ''), 10);
+    if (Number.isFinite(n)) return n;
+  }
+  if (ewScoreText) {
+    const n = parseInt(ewScoreText.replace(/[+,\s]/g, ''), 10);
+    if (Number.isFinite(n)) return -n;
+  }
+  return null;
+}
+
+function _usebioAuction(auctionEl) {
+  if (!auctionEl) return null;
+  const bids = [];
+  for (const round of auctionEl.querySelectorAll('AUCTION_ROUND')) {
+    for (const bid of round.querySelectorAll('BID')) {
+      const t = _usebioText(bid).toUpperCase();
+      if (!t) continue;
+      if (t === 'P' || t === 'PASS') bids.push('pass');
+      else if (t === 'X' || t === 'DBL') bids.push('X');
+      else if (t === 'XX' || t === 'RDBL') bids.push('XX');
+      else bids.push(t);
+    }
+  }
+  return bids.length ? bids : null;
+}
+
+async function doUsebioUpload(file) {
+  resetSessionState();
+  showLoading(true); showError('');
+  try {
+    const xml = await file.text();
+    const normalized = parseUsebioXml(xml, file.name);
+    enrichNormalized(normalized);
+    const data = deriveUploadResponse(normalized);
+    mergeNamesToStorage(data.player_acbl);
+    applyUploadResponse(data, { hasPbn: true });
+  } catch (e) {
+    showError('USEBIO parse failed: ' + e.message);
+  } finally {
+    showLoading(false);
+  }
+}
+
 async function doUpload(files, addTo) {
+  // USEBIO XML files are parsed client-side (no backend round-trip).
+  const xmlFile = files.find(f => f.name.toLowerCase().endsWith('.xml'));
+  if (xmlFile && !addTo) {
+    return doUsebioUpload(xmlFile);
+  }
   const formData = new FormData();
   let hasPbn = false;
   for (const f of files) {
     const ext = f.name.split('.').pop().toLowerCase();
+    if (ext === 'xml') continue; // shouldn't reach here, but be defensive
     formData.append(ext === 'pbn' ? 'pbn' : 'bws', f);
     if (ext === 'pbn') hasPbn = true;
   }
