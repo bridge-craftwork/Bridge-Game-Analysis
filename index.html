@@ -2590,13 +2590,17 @@ function setViewerRow(idx) {
   const r = currentBoardData?.results?.[idx];
   const viewer = document.getElementById('board-viewer');
   if (!viewer) return;
+  let nextUrl = null;
   if (currentViewerKind === 'bc') {
     const seat = playerSeatInResult(r, currentPlayerName);
-    const url = bcViewerUrl(currentBoardData?.deal_info, seat);
-    if (url) viewer.src = url;
+    nextUrl = bcViewerUrl(currentBoardData?.deal_info, seat);
   } else if (r && r.bbo_url) {
-    viewer.src = r.bbo_url;
+    nextUrl = r.bbo_url;
   }
+  // Only navigate when the URL actually changes. Otherwise rapid sequential
+  // setViewerRow calls (hideAll → renderBoard → row click) would cancel an
+  // in-flight load and leave the embedded view (BC handviewer) blank.
+  if (nextUrl && viewer.src !== nextUrl) viewer.src = nextUrl;
   // Disable BBO tab when no BBO URL exists for the active row.
   const bboTab = document.querySelector('.viewer-tab[data-viewer="bbo"]');
   if (bboTab) bboTab.disabled = !r?.bbo_url;
@@ -2959,7 +2963,9 @@ function hideAll() {
   document.getElementById('player-results').classList.add('hidden');
   document.getElementById('board-results').classList.add('hidden');
   document.getElementById('viewer-row').classList.add('hidden');
-  document.getElementById('board-viewer').src = '';
+  // Don't clear viewer.src — the row is hidden anyway, and clearing then
+  // immediately re-setting causes a redundant iframe navigation that can
+  // cancel an in-flight load (BC handviewer goes blank).
   currentBoardData = null;
 }
 
