@@ -2325,8 +2325,15 @@ function renderPlayer(data) {
     <div class="stat"><div class="stat-value">${f(data.avg_declarer_vs_field, v=>(v>=0?'+':'')+v.toFixed(2))}</div><div class="stat-label">Decl vs Field</div></div>
     <div class="stat"><div class="stat-value">${data.field_contract_pct.toFixed(0)}%</div><div class="stat-label">Field Contract</div></div>
   `;
+  // Play errors are only counted when the player was Declarer — when they
+  // sat Dummy the "Play" cause reflects the partner's misplay, which the
+  // player can't influence. Auction + Defense are partnership outcomes the
+  // player participates in either way, so those stay unfiltered.
   const causeCounts = { Auction: 0, Play: 0, Defense: 0 };
-  for (const r of data.board_results) if (r.cause in causeCounts) causeCounts[r.cause]++;
+  for (const r of data.board_results) {
+    if (r.cause === 'Play' && r.role !== 'Declarer') continue;
+    if (r.cause in causeCounts) causeCounts[r.cause]++;
+  }
   const causeStatBtn = (cause) => causeCounts[cause]
     ? `<div class="stat" style="cursor:pointer" onclick="switchView('boards');setCauseFilter('${cause}')" title="Show only ${cause} error boards">
         <div class="stat-value"><span class="cause cause-${cause}">${causeCounts[cause]}</span></div>
@@ -2401,7 +2408,7 @@ function goToBoard(num) {
 function activeBoardList() {
   if (!causeFilter || !currentPlayerData) return cachedBoards;
   const filtered = currentPlayerData.board_results
-    .filter(r => r.cause === causeFilter)
+    .filter(r => r.cause === causeFilter && (causeFilter !== 'Play' || r.role === 'Declarer'))
     .map(r => r.board_number);
   return cachedBoards.filter(n => filtered.includes(n));
 }
