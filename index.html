@@ -114,11 +114,10 @@ tr.clickable-row:hover td { background: #e0e7ff; }
 .bba-loading { color: var(--text-muted); font-size: 0.75rem; text-align: center; padding: 0.5rem; }
 
 .hand-viewer-frame { width: 100%; height: 500px; border: 1px solid var(--border); border-radius: var(--radius); }
-.viewer-tabs { display: flex; gap: 0.25rem; margin-bottom: 0.4rem; }
-.viewer-tab { padding: 0.3rem 0.85rem; font-size: 0.8rem; cursor: pointer; border: 1px solid var(--border); border-radius: 4px 4px 0 0; background: transparent; color: var(--text-muted); border-bottom: 1px solid transparent; margin-bottom: -1px; font-family: inherit; }
-.viewer-tab:hover { color: var(--text); }
-.viewer-tab.active { background: var(--surface); color: var(--text); font-weight: 500; border-bottom-color: var(--surface); }
-.viewer-tab[disabled] { cursor: not-allowed; opacity: 0.4; }
+.viewer-bar { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.4rem; }
+.viewer-label { font-size: 0.8rem; font-weight: 500; color: var(--text-muted); }
+.viewer-replay-link { font-size: 0.8rem; color: var(--primary, #2563eb); text-decoration: none; white-space: nowrap; }
+.viewer-replay-link:hover { text-decoration: underline; }
 
 /* Footer (matches bridge-classroom.com) */
 .footer { text-align: center; margin-top: 40px; padding-top: 24px; border-top: 0.5px solid var(--border); max-width: 1100px; margin-left: auto; margin-right: auto; padding-bottom: 24px; }
@@ -302,9 +301,9 @@ tr.clickable-row:hover td { background: #e0e7ff; }
   <div id="board-results" class="hidden">
     <div id="viewer-row" class="viewer-row hidden">
       <div class="viewer-col">
-        <div class="viewer-tabs">
-          <button class="viewer-tab active" data-viewer="bc" onclick="setViewerKind('bc')" type="button">Bridge Classroom</button>
-          <button class="viewer-tab" data-viewer="bbo" onclick="setViewerKind('bbo')" type="button">BBO</button>
+        <div class="viewer-bar">
+          <span class="viewer-label">BBO Hand Viewer</span>
+          <a id="bc-replay-link" class="viewer-replay-link hidden" target="_blank" rel="noopener" href="#">Open replay in Bridge Classroom ↗</a>
         </div>
         <iframe id="board-viewer" class="hand-viewer-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" allowfullscreen></iframe>
       </div>
@@ -2453,16 +2452,12 @@ function renderBoard(data) {
     }
   }
 
-  // Show viewer row if either the BC viewer can render the deal or any
-  // result has a BBO URL. Default to BC when a deal is present.
+  // Show viewer row if the BBO handviewer can render any result, or the
+  // deal is present (so the "open replay in Bridge Classroom" link works).
   const hasBcViewer = !!data.deal_info?.pbn;
   const hasBboViewer = data.results.some(r => r.bbo_url);
   const hasViewer = hasBcViewer || hasBboViewer;
   document.getElementById('viewer-row').classList.toggle('hidden', !hasViewer);
-  if (hasViewer && !hasBcViewer && currentViewerKind === 'bc') {
-    // Falls back to BBO when no deal is available.
-    setViewerKind('bbo');
-  }
   if (hasViewer) {
     setViewerRow(activeRowIdx);
     // Render par, fetch DD and BBA data
@@ -2526,9 +2521,7 @@ function clickBoardRow(idx) {
   }
 }
 
-// ---- Viewer tab (Bridge Classroom vs BBO handviewer) ----
-
-let currentViewerKind = 'bc'; // 'bc' or 'bbo' — sticks across rows + boards
+// ---- Hand viewer (embedded BBO handviewer + Bridge Classroom replay link) ----
 
 /** Mirror the current TLD: page on .org uses bridge-classroom.org viewer,
  *  .com uses .com. Falls back to .com for everything else (localhost,
@@ -2586,31 +2579,25 @@ function playerSeatInResult(result, name) {
   return null;
 }
 
-function setViewerKind(kind) {
-  currentViewerKind = kind;
-  document.querySelectorAll('.viewer-tab').forEach(b =>
-    b.classList.toggle('active', b.dataset.viewer === kind));
-  setViewerRow(activeRowIdx);
-}
-
 function setViewerRow(idx) {
   const r = currentBoardData?.results?.[idx];
   const viewer = document.getElementById('board-viewer');
   if (!viewer) return;
-  let nextUrl = null;
-  if (currentViewerKind === 'bc') {
-    const seat = playerSeatInResult(r, currentPlayerName);
-    nextUrl = bcViewerUrl(currentBoardData?.deal_info, seat);
-  } else if (r && r.bbo_url) {
-    nextUrl = r.bbo_url;
-  }
+  // Embed the BBO handviewer (compact, fits the viewport).
+  const nextUrl = r?.bbo_url || null;
   // Only navigate when the URL actually changes. Otherwise rapid sequential
   // setViewerRow calls (hideAll → renderBoard → row click) would cancel an
-  // in-flight load and leave the embedded view (BC handviewer) blank.
+  // in-flight load and leave the embedded view blank.
   if (nextUrl && viewer.src !== nextUrl) viewer.src = nextUrl;
-  // Disable BBO tab when no BBO URL exists for the active row.
-  const bboTab = document.querySelector('.viewer-tab[data-viewer="bbo"]');
-  if (bboTab) bboTab.disabled = !r?.bbo_url;
+  // Point the "open replay in a new tab" link at the Bridge Classroom viewer
+  // for this row's player seat. Hidden when there's no deal to replay.
+  const replayLink = document.getElementById('bc-replay-link');
+  if (replayLink) {
+    const seat = playerSeatInResult(r, currentPlayerName);
+    const bcUrl = bcViewerUrl(currentBoardData?.deal_info, seat);
+    if (bcUrl) replayLink.href = bcUrl;
+    replayLink.classList.toggle('hidden', !bcUrl);
+  }
 }
 
 // ==================== DD Table ====================
