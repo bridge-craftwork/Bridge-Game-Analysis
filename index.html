@@ -2537,31 +2537,46 @@ function bcViewerBase() {
   return `https://bridge-classroom.${tld}/solo-practice-app/#/bidding-practice`;
 }
 
-/** Convert dealInfo.pbn ("S:hand_at_S hand_W hand_N hand_E") to the
- *  Bridge Classroom convention ("N:hand_N hand_E hand_S hand_W"). */
-function pbnToNESW(pbn) {
+/** Parse a PBN deal string ("<dir>:h1 h2 h3 h4", hands listed clockwise
+ *  starting from <dir>) into hands keyed by absolute direction {N,E,S,W}. */
+function parsePbnHands(pbn) {
   if (!pbn || !pbn.includes(':')) return null;
   const [prefix, handsStr] = pbn.split(':');
-  const dealer = prefix.trim();
   const hands = handsStr.trim().split(/\s+/);
   if (hands.length !== 4) return null;
-  const order = { N: 0, E: 1, S: 2, W: 3 };
-  const dealerIdx = order[dealer];
-  if (dealerIdx == null) return null;
-  const reordered = ['N','E','S','W'].map(d => hands[(order[d] - dealerIdx + 4) % 4]);
-  return `N:${reordered.join(' ')}`;
+  const ORDER = ['N', 'E', 'S', 'W'];
+  const start = ORDER.indexOf(prefix.trim());
+  if (start < 0) return null;
+  const out = {};
+  for (let i = 0; i < 4; i++) out[ORDER[(start + i) % 4]] = hands[i];
+  return out;
 }
 
+/** Build the Bridge Classroom replay URL, rotating the whole table so the
+ *  subject player (seat) sits South. The viewer renders the deal as given,
+ *  so we relabel hands, dealer and vulnerability by the same rotation and
+ *  emit the PBN starting at South. No subject → no rotation. */
 function bcViewerUrl(dealInfo, seat) {
   if (!dealInfo?.pbn) return null;
-  const pbnNESW = pbnToNESW(dealInfo.pbn);
-  if (!pbnNESW) return null;
-  const params = new URLSearchParams({
-    pbn: pbnNESW,
-    dealer: dealInfo.dealer || 'N',
-    vul: dealInfo.vulnerability || 'None',
-  });
-  if (seat) params.set('seat', seat);
+  const hands = parsePbnHands(dealInfo.pbn);
+  if (!hands) return null;
+  const ORDER = ['N', 'E', 'S', 'W'];
+  // Clockwise steps that carry the subject's seat into South (index 2).
+  const rot = seat && ORDER.includes(seat) ? (2 - ORDER.indexOf(seat) + 4) % 4 : 0;
+  const rotTo = d => ORDER[(ORDER.indexOf(d) + rot) % 4];
+  // Each original seat's cards move to its rotated display position.
+  const disp = {};
+  for (const d of ORDER) disp[rotTo(d)] = hands[d];
+  // Emit clockwise from South so the subject's hand is both labelled and
+  // listed first: "S:hand_S hand_W hand_N hand_E".
+  const pbn = `S:${disp.S} ${disp.W} ${disp.N} ${disp.E}`;
+  const baseDealer = ORDER.includes(dealInfo.dealer) ? dealInfo.dealer : 'N';
+  const dealer = rotTo(baseDealer);
+  // A quarter/three-quarter turn swaps the NS and EW axes; None/Both unchanged.
+  let vul = dealInfo.vulnerability || 'None';
+  if (rot % 2 === 1) vul = vul === 'NS' ? 'EW' : vul === 'EW' ? 'NS' : vul;
+  const params = new URLSearchParams({ pbn, dealer, vul });
+  if (seat) params.set('seat', 'S');
   return `${bcViewerBase()}?${params.toString()}`;
 }
 
