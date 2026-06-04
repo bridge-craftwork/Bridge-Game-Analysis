@@ -266,6 +266,7 @@ tr.clickable-row:hover td { background: #e0e7ff; }
       <button class="btn btn-sm btn-outline" id="tab-history" onclick="switchView('history')">History</button>
       <button class="btn btn-sm" id="save-json-btn" style="margin-left:0.5rem;" title="Download the normalized JSON for this session">Save JSON</button>
       <button class="btn btn-sm" id="new-file-btn" style="margin-left:0.5rem;">New File</button>
+      <button class="btn btn-sm" id="export-pbn-btn" style="margin-left:0.5rem;" title="Download a PBN file of the current player's boards (contract & result from their table)">Export PBN</button>
     </div>
   </div>
 
@@ -1390,6 +1391,65 @@ function buildResultString(result) {
   return `${result.contract}${declCh}${rel}`;
 }
 
+/** Build a PBN (Portable Bridge Notation) document for one player's boards in
+ *  a session: one deal record per board they played, with the contract,
+ *  declarer and result taken from that player's own table. Returns
+ *  { text, filename } or null when there's nothing to export. */
+function buildPlayerPBN(game, sessionIdx, playerName) {
+  const session = pickSession(game, sessionIdx);
+  if (!session) return null;
+  const norm = normalizeName(playerName);
+  const meta = deriveEventMeta();
+  const event = meta.event_name || 'Game';
+  const pbnDate = (meta.event_date || '').replace(/-/g, '.'); // YYYY-MM-DD -> YYYY.MM.DD (PBN)
+  // PBN [Vulnerable] uses None/NS/EW/All; schema uses None/NS/EW/Both.
+  const vulMap = { None: 'None', NS: 'NS', EW: 'EW', Both: 'All', All: 'All' };
+
+  const records = [];
+  for (const board of session.boards) {
+    if (!board.deal) continue;
+    const result = board.results.find(r => findPlayerSeat(r, norm));
+    if (!result) continue;
+
+    const tags = [];
+    const tag = (k, v) => tags.push(`[${k} "${(v ?? '').toString().replace(/"/g, "'")}"]`);
+    const nameAt = (pair, idx) => displayName(result[pair]?.players?.[idx]?.name || '');
+    tag('Event', event);
+    tag('Site', '');
+    tag('Date', pbnDate);
+    tag('Board', board.number);
+    // ns_pair.players[0]=N, [1]=S; ew_pair.players[0]=W, [1]=E.
+    tag('West', nameAt('ew_pair', 0));
+    tag('North', nameAt('ns_pair', 0));
+    tag('East', nameAt('ew_pair', 1));
+    tag('South', nameAt('ns_pair', 1));
+    tag('Dealer', board.dealer || 'N');
+    tag('Vulnerable', vulMap[board.vulnerability] || 'None');
+    tag('Deal', dealToPBN(board.deal, board.dealer || 'N'));
+    tag('Scoring', 'MP');
+    if (!result.contract || result.contract === 'PASS') {
+      tag('Declarer', '');
+      tag('Contract', 'Pass');
+      tag('Result', '');
+    } else {
+      const tricks = tricksMade(result);
+      tag('Declarer', result.declarer || '');
+      tag('Contract', result.contract); // already canonical "3NT" / "4SX" / "6HXX"
+      tag('Result', tricks == null ? '' : tricks);
+      const score = result.score ?? 0;
+      tag('Score', score >= 0 ? `NS ${score}` : `EW ${-score}`);
+    }
+    records.push(tags.join('\n'));
+  }
+  if (!records.length) return null;
+
+  const text = '% PBN 2.1\n% Export "Club Game Analysis by Bridge Classroom"\n\n'
+    + records.join('\n\n') + '\n';
+  const safe = s => (s || '').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
+  const filename = `${safe(event)}-${safe(playerName)}-${safe(meta.event_date) || 'game'}.pbn`;
+  return { text, filename };
+}
+
 /** Run the JS analyzer on one player. Returns a PlayerAnalysisResponse-shape
  *  object, or null if the player has no rows in this session. */
 function jsAnalyzePlayer(game, sessionIdx, playerName) {
@@ -2220,6 +2280,29 @@ document.getElementById('new-file-btn').addEventListener('click', () => {
   document.getElementById('pbn-notice').classList.add('hidden');
   document.getElementById('names-notice').classList.add('hidden');
   hideAll();
+});
+
+document.getElementById('export-pbn-btn').addEventListener('click', () => {
+  const btn = document.getElementById('export-pbn-btn');
+  const orig = btn.textContent;
+  const flash = (msg, ms) => { btn.textContent = msg; setTimeout(() => { btn.textContent = orig; }, ms); };
+  try {
+    if (!currentPlayerName || !cachedNormalized) { flash('Open a player first', 2000); return; }
+    const pbn = buildPlayerPBN(cachedNormalized, currentSessionIdx, currentPlayerName);
+    if (!pbn) { flash('No boards', 2000); return; }
+    const blob = new Blob([pbn.text], { type: 'application/x-pbn' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = pbn.filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    flash('Saved!', 1500);
+  } catch (e) {
+    flash('Error', 2000);
+  }
 });
 
 // ==================== View Switching ====================
