@@ -2723,7 +2723,13 @@ function buildDDStringFromSchema(boardDD) {
   return any ? out : null;
 }
 
+// Monotonic token guarding against an async DD race: a slow response (BSOL
+// fetch, or the first-board loadNormalized) from a board the user has already
+// navigated away from must not overwrite the current board's table. Each
+// fetchDD call supersedes the previous one; stale calls bail before rendering.
+let ddFetchSeq = 0;
 async function fetchDD(dealInfo, activeResult, boardNumber) {
+  const token = ++ddFetchSeq;
   cachedDDTricks = null;
   const ddEl = document.getElementById('dd-section');
   ddEl.innerHTML = '<div class="bba-loading">Loading DD analysis...</div>';
@@ -2737,6 +2743,7 @@ async function fetchDD(dealInfo, activeResult, boardNumber) {
   if (!cachedNormalized && boardNumber != null) {
     try { await loadNormalized(); } catch (e) { /* fall through to BSOL */ }
   }
+  if (token !== ddFetchSeq) return; // a newer board render superseded this one
   if (cachedNormalized && boardNumber != null) {
     const session = pickSession(cachedNormalized, currentSessionIdx);
     const board = session?.boards.find(b => b.number === boardNumber);
@@ -2755,8 +2762,10 @@ async function fetchDD(dealInfo, activeResult, boardNumber) {
     const vul = dealInfo.vulnerability === 'Both' ? 'All' : dealInfo.vulnerability;
     const url = `https://dds.bridgewebs.com/cgi-bin/bsol2/ddummy?request=m&dealstr=${encodeURIComponent(pbn)}&vul=${vul}&club=clubgameanalysis`;
     const res = await fetch(url);
+    if (token !== ddFetchSeq) return; // superseded while awaiting BSOL
     if (!res.ok) { ddEl.innerHTML = '<div class="bba-loading">DD unavailable</div>'; return; }
     const text = await res.text();
+    if (token !== ddFetchSeq) return; // superseded while reading the body
     const json = JSON.parse(text.trim());
     if (!json.sess || !json.sess.ddtricks || json.sess.ddtricks.length < 20) {
       ddEl.innerHTML = '<div class="bba-loading">DD unavailable</div>'; return;
@@ -2764,6 +2773,7 @@ async function fetchDD(dealInfo, activeResult, boardNumber) {
     cachedDDTricks = json.sess.ddtricks;
     renderDDTable(cachedDDTricks, activeResult);
   } catch (e) {
+    if (token !== ddFetchSeq) return; // superseded; leave the current board's table alone
     ddEl.innerHTML = '<div class="bba-loading">DD unavailable</div>';
   }
 }
