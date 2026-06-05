@@ -1391,10 +1391,13 @@ function buildResultString(result) {
   return `${result.contract}${declCh}${rel}`;
 }
 
-/** Build a PBN (Portable Bridge Notation) document for one player's boards in
- *  a session: one deal record per board they played, with the contract,
- *  declarer and result taken from that player's own table. Returns
- *  { text, filename } or null when there's nothing to export. */
+/** Build a PBN (Portable Bridge Notation) document for a session: one deal
+ *  record per board (every board with a deal, regardless of who played it),
+ *  annotated with the selected player's table — names, contract, declarer,
+ *  result and score — only on the boards they actually played. Boards the
+ *  player sat out are still emitted (deal only) so the board set is complete
+ *  and board numbers stay correct. Returns { text, filename } or null when
+ *  there's nothing to export. */
 function buildPlayerPBN(game, sessionIdx, playerName) {
   const session = pickSession(game, sessionIdx);
   if (!session) return null;
@@ -1407,37 +1410,42 @@ function buildPlayerPBN(game, sessionIdx, playerName) {
 
   const records = [];
   for (const board of session.boards) {
-    if (!board.deal) continue;
+    if (!board.deal) continue; // can't write a deal record without the hands
+    // The selected player's result at this board, if they played it.
     const result = board.results.find(r => findPlayerSeat(r, norm));
-    if (!result) continue;
 
     const tags = [];
     const tag = (k, v) => tags.push(`[${k} "${(v ?? '').toString().replace(/"/g, "'")}"]`);
-    const nameAt = (pair, idx) => displayName(result[pair]?.players?.[idx]?.name || '');
     tag('Event', event);
     tag('Site', '');
     tag('Date', pbnDate);
-    tag('Board', board.number);
-    // ns_pair.players[0]=N, [1]=S; ew_pair.players[0]=W, [1]=E.
-    tag('West', nameAt('ew_pair', 0));
-    tag('North', nameAt('ns_pair', 0));
-    tag('East', nameAt('ew_pair', 1));
-    tag('South', nameAt('ns_pair', 1));
+    tag('Board', board.number); // always the real board number, never a counter
+    if (result) {
+      // ns_pair.players[0]=N, [1]=S; ew_pair.players[0]=W, [1]=E.
+      const nameAt = (pair, idx) => displayName(result[pair]?.players?.[idx]?.name || '');
+      tag('West', nameAt('ew_pair', 0));
+      tag('North', nameAt('ns_pair', 0));
+      tag('East', nameAt('ew_pair', 1));
+      tag('South', nameAt('ns_pair', 1));
+    }
     tag('Dealer', board.dealer || 'N');
     tag('Vulnerable', vulMap[board.vulnerability] || 'None');
     tag('Deal', dealToPBN(board.deal, board.dealer || 'N'));
     tag('Scoring', 'MP');
-    if (!result.contract || result.contract === 'PASS') {
-      tag('Declarer', '');
-      tag('Contract', 'Pass');
-      tag('Result', '');
-    } else {
-      const tricks = tricksMade(result);
-      tag('Declarer', result.declarer || '');
-      tag('Contract', result.contract); // already canonical "3NT" / "4SX" / "6HXX"
-      tag('Result', tricks == null ? '' : tricks);
-      const score = result.score ?? 0;
-      tag('Score', score >= 0 ? `NS ${score}` : `EW ${-score}`);
+    // Contract/declarer/result/score only for boards the player played.
+    if (result) {
+      if (!result.contract || result.contract === 'PASS') {
+        tag('Declarer', '');
+        tag('Contract', 'Pass');
+        tag('Result', '');
+      } else {
+        const tricks = tricksMade(result);
+        tag('Declarer', result.declarer || '');
+        tag('Contract', result.contract); // already canonical "3NT" / "4SX" / "6HXX"
+        tag('Result', tricks == null ? '' : tricks);
+        const score = result.score ?? 0;
+        tag('Score', score >= 0 ? `NS ${score}` : `EW ${-score}`);
+      }
     }
     records.push(tags.join('\n'));
   }
