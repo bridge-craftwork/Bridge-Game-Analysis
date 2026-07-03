@@ -99,72 +99,28 @@ Before committing, always run and fix:
 
 ## Production Deployment
 
-Migrated 2026-04-30 from a native systemd binary to a container in the [bridge-craftwork-platform](../bridge-craftwork-platform) compose stack. The systemd unit is gone; everything below describes the current container path.
+The **frontend is a static single-page `index.html`, served by GitHub Pages** —
+this repo is the whole client. The old droplet path (a native systemd binary,
+then a `bridge-analysis` container in the bridge-craftwork-platform compose
+stack at `club-game-analysis.bridge-classroom.com`) was **RETIRED 2026-06-29**:
+analysis moved into this frontend JS, and file parsing moved to the separate
+`bridge-event-parser-service`. There is no longer any droplet container, image,
+`just deploy`, or `ssh bridge-droplet` step for this app — ignore any older
+notes that say otherwise.
 
 ### Architecture
 
 ```
-User → Cloudflare DNS → edge Caddy (container, host network) → 127.0.0.1:3001 → bridge-analysis container
+User → Cloudflare DNS (game-analysis.bridge-classroom.com) → GitHub Pages (this repo's index.html)
+                              │
+        client-side fetches → game-parser.bridge-craftwork.com  (bridge-event-parser-service — .bws/.pbn/.xml parsing)
+                            → dds.bridgewebs.com (BSOL double-dummy), bba.harmonicsystems.com (BBA auctions)
 ```
 
-- **Domain:** `club-game-analysis.bridge-classroom.com` (Cloudflare DNS-only — edge Caddy terminates TLS via Let's Encrypt).
-- **Edge Caddy:** container in `/opt/edge/` on the droplet (managed by platform repo's `edge/Caddyfile`). Stanza already in place from before the migration; no change needed.
-- **Service:** `bridge-analysis` block in `/opt/bridge-craftwork/docker-compose.yml` (file lives in the platform repo at `droplet/docker-compose.yml`, symlinked into `/opt/bridge-craftwork/`).
-- **Image:** `ghcr.io/rick-wilson/bridge-analysis:dev` for iteration, `:vX.Y.Z` and `:latest` from CI on tags.
-- **Port:** 3001 (loopback only — `127.0.0.1:3001:3001`).
-- **Volume:** `/opt/bridge-craftwork/data/services/bridge-analysis/{uploads,logs}/` ↔ container's `/data/`.
-- **mdbtools** is in the runtime image (`RUNTIME_PACKAGES="mdbtools"` in [Dockerfile](Dockerfile)). No host install required.
-- **SSH:** `ssh bridge-droplet` (a maintainer-local alias in `~/.ssh/config`).
-
-### Local build → droplet (the iteration path)
-
-The [justfile](justfile) wraps the whole local pipeline. Prereq once: `colima start --vz-rosetta` (Apple Silicon needs Rosetta-via-VZ to cross-compile to amd64 cleanly; QEMU segfaults rustc).
-
-```sh
-just build      # docker buildx → linux/amd64 → ghcr.io/rick-wilson/bridge-analysis:dev (local)
-just push       # build + docker push :dev to ghcr.io
-just deploy     # push + ssh bridge-droplet '/opt/bridge-craftwork/scripts/deploy.sh bridge-analysis'
-just logs       # tail droplet logs
-```
-
-`deploy.sh` is generic: `docker compose pull <service> && docker compose up -d <service>`.
-
-### CI/CD Pipeline
-
-GitHub Actions (`.github/workflows/ci.yml`) on push to `main` and on `v*` tags:
-1. `cargo fmt --check && cargo clippy -- -D warnings && cargo test --all`.
-2. `docker buildx build --platform linux/amd64` and push to `ghcr.io/rick-wilson/bridge-analysis`:
-   - `:main` for branch pushes
-   - `:vX.Y.Z` and `:latest` for tags
-
-To promote a tagged release to the droplet: `just release vX.Y.Z` (tags + pushes, then `just deploy-version vX.Y.Z` after CI).
-
-### Server Management
-
-```bash
-# Check status
-ssh bridge-droplet 'cd /opt/bridge-craftwork && docker compose ps bridge-analysis'
-
-# View logs (tail)
-ssh bridge-droplet 'cd /opt/bridge-craftwork && docker compose logs -f --tail 100 bridge-analysis'
-
-# Restart
-ssh bridge-droplet 'cd /opt/bridge-craftwork && docker compose restart bridge-analysis'
-
-# Shell into the running container
-ssh -t bridge-droplet 'cd /opt/bridge-craftwork && docker compose exec bridge-analysis /bin/sh'
-```
-
-### Environment Configuration
-
-Env vars are wired in the platform repo's `droplet/docker-compose.yml`. Secrets come from `/opt/bridge-craftwork/.env` (mode 600, never committed):
-
-```
-BRIDGE_ANALYSIS_TAG=dev                 # flip to vX.Y.Z to pin a release
-BRIDGE_ANALYSIS_DASHBOARD_SECRET=…      # was ADMIN_KEY in the old systemd .env
-```
-
-The compose file injects these plus static values (`PORT=3001`, `HOST=0.0.0.0`, `LOG_LEVEL=info`, `LOG_FORMAT=json`, `UPLOAD_DIR=/data/uploads`, `LOG_DIR=/data/logs`).
+- **Domain:** `game-analysis.bridge-classroom.com` (the committed `CNAME`; Cloudflare-proxied → GitHub Pages).
+- **Deploy:** push to `main` → `.github/workflows/deploy.yml` (`actions/upload-pages-artifact` + `actions/deploy-pages`). The workflow copies `index.html` → `404.html` for SPA routing. No build step — the SPA is hand-authored `index.html` with inlined JS/CSS.
+- **Parsing backend:** `const BASE = 'https://game-parser.bridge-craftwork.com'` in `index.html` points at `bridge-event-parser-service` (a separate repo/service) for `/api/upload` / `/api/normalized`. Deals otherwise live client-side in `sessionStorage['bc-game']`.
+- **Bridge Classroom hand-off:** `bcViewerUrl()` builds `bridge-classroom.{com|org}/solo-practice-app/#/bidding-practice?pbn=…` single-board replay links; the "Send to Library" button POSTs a whole game to `api.bridge-classroom.{com|org}/api/deal-library` (`bcApiBase()`), keyed to the teacher by a `?bc_owner=<id>` launch handshake from their Bridge Classroom Deal Library tab.
 
 ### Other Services on the Same Droplet
 
