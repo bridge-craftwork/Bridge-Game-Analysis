@@ -2011,6 +2011,10 @@ function applyUploadResponse(data, opts) {
     try { sessionStorage.setItem('bc-game', JSON.stringify(data.normalized)); } catch (e) {}
     try { autoSaveTrackedPlayers(data.normalized); } catch (e) {}
     saveToEventCache(eventCacheId(data.normalized), data.normalized).catch(() => {});
+    // Registered users: also persist the game to their Bridge Classroom
+    // club_games archive (server-side, cross-device). Anonymous users are
+    // skipped — their games stay in the browser (app-architecture.md M3).
+    maybeSaveClubGame(data.normalized);
   }
   cachedPlayers = data.players;
   cachedBoards = data.boards;
@@ -2687,10 +2691,60 @@ function bcApiBase() {
 // too — it only filters casual misuse; real protection is per-user/E2E).
 const BC_API_KEY = '8a3ccc23767bdcbe6bb1709dfe3f20194dc0b8b4874939244e802dc71a21a568';
 
-/** The teacher's Bridge Classroom user id, captured from a ?bc_owner=<id>
- *  launch (their Deal Library "Import a club game →" link) and persisted. */
+/** The current Bridge Classroom user id. When co-located under the SPA origin
+ *  (bridge-classroom.{tld}/game-analysis/), read the SPA's own user store
+ *  directly — same-origin, so no ?bc_owner handshake needed. Returns '' for
+ *  anonymous visitors (no registered account). */
+function bcCurrentUserId() {
+  try {
+    const store = JSON.parse(localStorage.getItem('bridgePractice') || '{}');
+    const id = store.currentUserId;
+    if (id && store.users && store.users[id]) return id;
+  } catch (e) {}
+  return '';
+}
+
+/** The Bridge Classroom user id to act as: the same-origin SPA user if present,
+ *  else a ?bc_owner=<id> launch value (the Deal Library "Import a club game →"
+ *  link, used when this app is opened cross-origin). */
 function bcOwner() {
+  const spaUser = bcCurrentUserId();
+  if (spaUser) return spaUser;
   try { return localStorage.getItem('bc-owner') || ''; } catch (e) { return ''; }
+}
+
+/** Auto-save a freshly loaded game to the registered user's club_games archive
+ *  (server-side, durable, cross-device). Anonymous users are skipped — their
+ *  games stay local (app-architecture.md M3/D13). Upsert by event_key, so
+ *  re-loading the same game refreshes rather than duplicates. Fire-and-forget:
+ *  a failure never blocks analysis. */
+async function maybeSaveClubGame(normalized) {
+  const owner = bcCurrentUserId();
+  if (!owner || !normalized) return;
+  const t = normalized?.tournaments?.[0];
+  const ev = t?.events?.[0];
+  let boardCount = null;
+  try { boardCount = pickSession(normalized, 0)?.boards?.length ?? null; } catch (e) {}
+  try {
+    await fetch(`${bcApiBase()}/club-games`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': BC_API_KEY },
+      body: JSON.stringify({
+        owner,
+        event_key: eventCacheId(normalized),
+        event_name: ev?.name || t?.name || null,
+        event_date: ev?.date || normalized?.fetched_at?.slice(0, 10) || null,
+        // No dedicated location field in the normalized schema yet; the full
+        // data lives in `payload` regardless. Populate this column when the
+        // extractor exposes a venue/club field.
+        location: null,
+        board_count: boardCount,
+        payload: JSON.stringify(normalized),
+      }),
+    });
+  } catch (err) {
+    console.warn('club-game auto-save failed', err);
+  }
 }
 
 /** All boards of a session as one multi-board PBN — a frozen, dealable
