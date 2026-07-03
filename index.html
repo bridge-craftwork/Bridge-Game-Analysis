@@ -267,6 +267,7 @@ tr.clickable-row:hover td { background: #e0e7ff; }
       <button class="btn btn-sm" id="save-json-btn" style="margin-left:0.5rem;" title="Download the normalized JSON for this session">Save JSON</button>
       <button class="btn btn-sm" id="new-file-btn" style="margin-left:0.5rem;">New File</button>
       <button class="btn btn-sm" id="export-pbn-btn" style="margin-left:0.5rem;" title="Download a PBN file of the current player's boards (contract & result from their table)">Export PBN</button>
+      <button class="btn btn-sm" id="send-library-btn" style="margin-left:0.5rem;display:none;" title="Send this whole game to your Bridge Classroom deal library">📚 Send to Library</button>
     </div>
   </div>
 
@@ -2313,6 +2314,52 @@ document.getElementById('export-pbn-btn').addEventListener('click', () => {
   }
 });
 
+// Capture the Bridge Classroom identity from the launch URL (Deal Library
+// "Import a club game →") and remember it; reveal "Send to Library" once we
+// know who to post for.
+(function initBcLibrary() {
+  try {
+    const owner = new URLSearchParams(window.location.search).get('bc_owner');
+    if (owner) localStorage.setItem('bc-owner', owner);
+  } catch (e) {}
+  const btn = document.getElementById('send-library-btn');
+  if (btn && bcOwner()) btn.style.display = '';
+})();
+
+document.getElementById('send-library-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('send-library-btn');
+  const orig = btn.textContent;
+  const flash = (msg, ms) => { btn.textContent = msg; setTimeout(() => { btn.textContent = orig; }, ms); };
+  const owner = bcOwner();
+  if (!owner) { flash('Open from Bridge Classroom first', 2500); return; }
+  if (!cachedNormalized) { flash('Load a game first', 2000); return; }
+  const pbn = buildGamePBN(cachedNormalized, currentSessionIdx);
+  if (!pbn) { flash('No boards', 2000); return; }
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    const res = await fetch(`${bcApiBase()}/deal-library`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': BC_API_KEY },
+      body: JSON.stringify({ owner, kind: 'file', name: pbn.name, payload: pbn.text }),
+    });
+    btn.disabled = false;
+    btn.textContent = orig;
+    if (res.ok) {
+      flash('Saved to library ✓', 2500);
+    } else {
+      const t = await res.text().catch(() => '');
+      console.error('send-to-library failed', res.status, t);
+      flash(res.status === 429 ? 'Library full' : 'Failed', 2500);
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = orig;
+    console.error('send-to-library error', e);
+    flash('Error', 2500);
+  }
+});
+
 // ==================== View Switching ====================
 function switchView(view) {
   document.getElementById('tab-players').classList.toggle('active', view === 'players');
@@ -2626,6 +2673,50 @@ function bcViewerBase() {
   } catch (e) {}
   const tld = window.location.hostname.endsWith('.org') ? 'org' : 'com';
   return `https://bridge-classroom.${tld}/solo-practice-app/#/bidding-practice`;
+}
+
+/** Bridge Classroom API base, TLD-mirrored like bcViewerBase(). Override for
+ *  local dev: localStorage.setItem('bc-api-base', 'http://localhost:3000/api') */
+function bcApiBase() {
+  try { const o = localStorage.getItem('bc-api-base'); if (o) return o; } catch (e) {}
+  const tld = window.location.hostname.endsWith('.org') ? 'org' : 'com';
+  return `https://api.bridge-classroom.${tld}/api`;
+}
+
+// Shared, non-secret frontend API key (baked into the Bridge Classroom SPA
+// too — it only filters casual misuse; real protection is per-user/E2E).
+const BC_API_KEY = '8a3ccc23767bdcbe6bb1709dfe3f20194dc0b8b4874939244e802dc71a21a568';
+
+/** The teacher's Bridge Classroom user id, captured from a ?bc_owner=<id>
+ *  launch (their Deal Library "Import a club game →" link) and persisted. */
+function bcOwner() {
+  try { return localStorage.getItem('bc-owner') || ''; } catch (e) { return ''; }
+}
+
+/** All boards of a session as one multi-board PBN — a frozen, dealable
+ *  snapshot for the library (deals only; contracts/results aren't needed to
+ *  play the boards at a table). */
+function buildGamePBN(game, sessionIdx) {
+  const session = pickSession(game, sessionIdx);
+  if (!session) return null;
+  const meta = deriveEventMeta();
+  const vulMap = { None: 'None', NS: 'NS', EW: 'EW', Both: 'All', All: 'All' };
+  const records = [];
+  for (const board of session.boards) {
+    if (!board.deal) continue;
+    const tags = [];
+    const tag = (k, v) => tags.push(`[${k} "${(v ?? '').toString().replace(/"/g, "'")}"]`);
+    tag('Board', board.number);
+    tag('Dealer', board.dealer || 'N');
+    tag('Vulnerable', vulMap[board.vulnerability] || 'None');
+    tag('Deal', dealToPBN(board.deal, board.dealer || 'N'));
+    records.push(tags.join('\n'));
+  }
+  if (!records.length) return null;
+  const name = [meta.event_name || 'Club game', meta.event_date].filter(Boolean).join(' — ');
+  const text = '% PBN 2.1\n% Export "Club Game Analysis by Bridge Classroom"\n\n'
+    + records.join('\n\n') + '\n';
+  return { text, name };
 }
 
 /** Parse a PBN deal string ("<dir>:h1 h2 h3 h4", hands listed clockwise
