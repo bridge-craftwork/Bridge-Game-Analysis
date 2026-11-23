@@ -217,9 +217,9 @@ tr.clickable-row:hover td { background: #e0e7ff; }
   <!-- Upload (only shown on the / route) -->
   <div id="upload-area" class="upload-area">
     <p>Upload your game files<br>
-    <small>ACBLscore/ACBLlive: select both .BWS and .PBN together (hold Cmd/Ctrl). EBU/USEBIO: drop the .XML file.</small></p>
+    <small>ACBLscore/ACBLlive: select both .BWS and .PBN together (hold Cmd/Ctrl). EBU/USEBIO: drop the .XML file. Game data saved with Save JSON (or any normalized-schema .JSON): drop the .JSON file.</small></p>
     <label class="btn" for="file-input">Choose Files</label>
-    <input type="file" id="file-input" multiple accept=".bws,.pbn,.xml,.BWS,.PBN,.XML">
+    <input type="file" id="file-input" multiple accept=".bws,.pbn,.xml,.json,.BWS,.PBN,.XML,.JSON">
     <div id="file-names" style="margin-top:0.5rem;color:var(--text-muted);font-size:0.85rem;"></div>
   </div>
 
@@ -734,7 +734,50 @@ async function doUsebioUpload(file) {
   }
 }
 
+/** Problem with a normalized-schema document's version, or null when this
+ *  analyzer reads it. Shared by the /analyze handoff and the .json upload. */
+function schemaVersionProblem(parsed) {
+  const ver = (parsed && parsed.schema_version) || '';
+  const major = parseInt(String(ver).split('.')[0], 10);
+  if (!Number.isFinite(major)) return `Game data is missing a valid schema_version (got "${ver}").`;
+  if (major !== SUPPORTED_MAJOR) {
+    return `Schema version ${ver} is not supported by this analyzer ` +
+      `(supports ${SUPPORTED_MAJOR}.x). Update Bridge Classroom to a newer build.`;
+  }
+  return null;
+}
+
+/** A normalized-schema JSON file (Save JSON's output, or another source's
+ *  export such as a Brill daily converted by rusty-bidding-bot), processed
+ *  client-side the same way as the extension's /analyze handoff. */
+async function doJsonUpload(file) {
+  resetSessionState();
+  showLoading(true); showError('');
+  try {
+    let parsed;
+    try { parsed = JSON.parse(await file.text()); } catch (e) {
+      throw new Error('not valid JSON: ' + e.message);
+    }
+    const problem = schemaVersionProblem(parsed);
+    if (problem) throw new Error(problem);
+    enrichNormalized(parsed);
+    const data = deriveUploadResponse(parsed);
+    sessionId = data.session_id;
+    mergeNamesToStorage(data.player_acbl);
+    applyUploadResponse(data, { hasPbn: true });
+  } catch (e) {
+    showError('JSON load failed: ' + e.message);
+  } finally {
+    showLoading(false);
+  }
+}
+
 async function doUpload(files, addTo) {
+  // Normalized JSON is processed client-side (no backend round-trip).
+  const jsonFile = files.find(f => f.name.toLowerCase().endsWith('.json'));
+  if (jsonFile && !addTo) {
+    return doJsonUpload(jsonFile);
+  }
   // USEBIO XML files are parsed client-side (no backend round-trip).
   const xmlFile = files.find(f => f.name.toLowerCase().endsWith('.xml'));
   if (xmlFile && !addTo) {
@@ -3255,17 +3298,9 @@ async function bootstrapAnalyze() {
 
   // Quick client-side version check so unsupported schemas don't even
   // hit the server. The server enforces the same rule.
-  const ver = (parsed && parsed.schema_version) || '';
-  const major = parseInt(String(ver).split('.')[0], 10);
-  if (!Number.isFinite(major)) {
-    showAnalyzeError(`Game data is missing a valid schema_version (got "${ver}").`);
-    return;
-  }
-  if (major !== SUPPORTED_MAJOR) {
-    showAnalyzeError(
-      `Schema version ${ver} is not supported by this analyzer ` +
-      `(supports ${SUPPORTED_MAJOR}.x). Update Bridge Classroom to a newer build.`
-    );
+  const problem = schemaVersionProblem(parsed);
+  if (problem) {
+    showAnalyzeError(problem);
     return;
   }
 
