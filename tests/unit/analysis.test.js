@@ -315,3 +315,88 @@ describe('whole-session analysis', () => {
     assert.equal(JSON.stringify(g), before, 'input must not be mutated');
   });
 });
+
+describe('double-dummy table display', () => {
+  // Rows N, S, E, W; strains NT, S, H, D, C. The deal from the board view this
+  // was written against: NS take 11 in hearts and clubs, EW 8 in spades.
+  const DD = '85b7b' + '85b7b' + '48262' + '48262';
+  const H = 2, S = 3; // display columns
+  const table = A.ddContractFromResult('3SE-1');
+  const bba = { seat: 'S', strain: H, level: 2, doubled: '' };
+  const cellAt = (rows, seat, col) => rows.find((r) => r.seat === seat).cells[col];
+
+  test('reads a result string as a contract', () => {
+    assert.deepEqual(table, { seat: 'E', strain: S, level: 3, doubled: '' });
+    assert.deepEqual(A.ddContractFromResult('3NTXN+1'), { seat: 'N', strain: 4, level: 3, doubled: 'X' });
+    assert.equal(A.ddContractFromResult('Pass'), null);
+  });
+
+  test('identical partnerships collapse to two rows', () => {
+    const rows = A.ddDisplayRows(DD, { table, bba, par: 'NS 5H' });
+    assert.deepEqual(rows.map((r) => r.seat), ['NS', 'EW']);
+    assert.deepEqual(rows[0].cells.map((c) => c.tricks), [11, 7, 11, 5, 8]);
+  });
+
+  test('a pair that differs anywhere keeps both rows', () => {
+    const dd = '85b7b' + '85a7b' + '48262' + '48262'; // South takes 10 in hearts
+    assert.deepEqual(A.ddDisplayRows(dd, {}).map((r) => r.seat), ['N', 'S', 'EW']);
+    const all = '85b7b' + '85a7b' + '48262' + '48263';
+    assert.deepEqual(A.ddDisplayRows(all, {}).map((r) => r.seat), ['N', 'S', 'E', 'W']);
+  });
+
+  test('the table pink and BBA green when they differ; par bold', () => {
+    const rows = A.ddDisplayRows(DD, { table, bba, par: 'NS 5H' });
+    const bbaCell = cellAt(rows, 'NS', H);
+    assert.equal(bbaCell.colour, 'green');
+    assert.ok(bbaCell.isBba && bbaCell.isPar && !bbaCell.isTable);
+    const tableCell = cellAt(rows, 'EW', S);
+    assert.equal(tableCell.colour, 'pink');
+    assert.ok(!tableCell.isPar);
+  });
+
+  test('the table green when BBA agrees or has not answered', () => {
+    const same = { ...table, level: 2 };
+    assert.equal(cellAt(A.ddDisplayRows(DD, { table, bba: same }), 'EW', S).colour, 'green');
+    assert.equal(cellAt(A.ddDisplayRows(DD, { table }), 'EW', S).colour, 'green');
+  });
+
+  test('pink and green on one partnership\'s two hands keep them apart', () => {
+    // Played by North, BBA from South: merged, the NS hearts cell would be both.
+    const rows = A.ddDisplayRows(DD, { table: A.ddContractFromResult('4HN='), bba });
+    assert.deepEqual(rows.map((r) => r.seat), ['N', 'S', 'EW']);
+    assert.equal(cellAt(rows, 'N', H).colour, 'pink');
+    assert.equal(cellAt(rows, 'S', H).colour, 'green');
+  });
+
+  test('par is bold only on the seats that make it', () => {
+    const dd = '85b7b' + '85a7b' + '48262' + '48262';
+    const rows = A.ddDisplayRows(dd, { par: 'NS 5H' });
+    assert.ok(cellAt(rows, 'N', H).isPar);
+    assert.ok(!cellAt(rows, 'S', H).isPar);
+    // A sacrifice: EW 5SX-2 needs 9 tricks, which neither hand has here, so
+    // both are marked rather than neither.
+    const sac = A.ddDisplayRows(DD, { par: 'EW 5SX-2' });
+    assert.ok(cellAt(sac, 'EW', S).isPar);
+  });
+
+  test('tooltips say what the colours and weight mean', () => {
+    const rows = A.ddDisplayRows(DD, { table, bba, par: 'NS 5H' });
+    assert.equal(
+      A.ddCellTitle('NS', H, cellAt(rows, 'NS', H), { table, bba }),
+      'North and South take 11 tricks in hearts\n' +
+        'Green: BBA\'s contract, 2♥ by South, makes with 3 over on best play.\nBold: par.',
+    );
+    assert.equal(
+      A.ddCellTitle('EW', S, cellAt(rows, 'EW', S), { table, bba }),
+      'East and West take 8 tricks in spades\n' +
+        'Pink: played at this table, 3♠ by East, down 1 on best play. BBA bid 2♥ by South.',
+    );
+    assert.equal(A.ddCellTitle('NS', 0, cellAt(rows, 'NS', 0), { table, bba }),
+      'North and South take 11 tricks in clubs');
+  });
+
+  test('no table for a missing string', () => {
+    assert.equal(A.ddDisplayRows(null, {}), null);
+    assert.equal(A.ddDisplayRows('85b7b', {}), null);
+  });
+});
