@@ -1265,6 +1265,154 @@ async function getJSON(url, init) {
   return res.json();
 }
 
+// ---- Double-dummy table display ----
+//
+// The board view's double-dummy table, drawn the way Bridge Classroom's
+// DoubleDummyTable and the Bridge Classroom DD extension draw theirs: rows read
+// N, S, E, W, partners adjacent, and a partnership whose two hands take the same
+// tricks in every strain shows as one NS or EW row. Lossless, since a pair merges
+// only when nothing differs, so a table shows two, three or four rows.
+//
+// Three marks. Par cells are bold. The contract played at the selected table is
+// green when BBA bid the same thing (or BBA has not answered) and pink when BBA
+// bid something else, and then BBA's own contract is green. The meanings are in
+// each cell's tooltip rather than a key, since this panel is often captured for
+// handouts.
+//
+// One more case keeps a pair apart: if the table and BBA chose the same strain
+// from the two hands of one partnership, merging would put pink and green on one
+// cell, so those two rows stay separate.
+
+/** Display order of the rows, and the row order of the 20-character ddtricks string. */
+const DD_SEATS = ['N', 'S', 'E', 'W'];
+/** ddtricks strain position (NT, S, H, D, C) for each display column (C, D, H, S, NT). */
+const DD_STRING_COL = [4, 3, 2, 1, 0];
+const DD_SEAT_NAMES = { N: 'North', S: 'South', E: 'East', W: 'West',
+                        NS: 'North and South', EW: 'East and West' };
+const DD_STRAIN_WORDS = ['clubs', 'diamonds', 'hearts', 'spades', 'notrump'];
+const DD_GLYPHS = ['♣', '♦', '♥', '♠', 'NT'];
+
+/** One ddtricks character (hex, 0-d) → tricks. */
+function ddTrickValue(ch) {
+  const n = parseInt(ch, 16);
+  return Number.isInteger(n) && n >= 0 && n <= 13 ? n : 0;
+}
+
+/** A result string ("3SE-1", "4HXN=", "3NTE+2") → { seat, strain, level,
+ *  doubled }, strain a display column (C, D, H, S, NT = 0..4). Null for a
+ *  pass-out or anything unreadable. */
+function ddContractFromResult(resultStr) {
+  const m = /^([1-7])(NT|[SHDC])(X{0,2})([NESW])/.exec(resultStr || '');
+  if (!m) return null;
+  return { seat: m[4], strain: STRAINS.indexOf(m[2]), level: Number(m[1]), doubled: m[3] };
+}
+
+/** "NS 5H", "EW 3N+2; NS 4SX-1" → [{ seats, strain, level, offset }]. A side
+ *  names both its seats; offset is the result (+2, -1; 0 when absent or "="). */
+function ddParseParContracts(parContract) {
+  if (typeof parContract !== 'string') return [];
+  const sides = { NS: ['N', 'S'], EW: ['E', 'W'], N: ['N'], S: ['S'], E: ['E'], W: ['W'] };
+  const out = [];
+  for (const part of parContract.split(/[;,]/)) {
+    const m = /^\s*(NS|EW|[NESW])\s+([1-7])(NT|N|[SHDC])X{0,2}\s*([+-]\d+)?/i.exec(part);
+    if (!m) continue;
+    const s = m[3].toUpperCase();
+    out.push({ seats: sides[m[1].toUpperCase()], strain: STRAINS.indexOf(s === 'N' ? 'NT' : s),
+               level: Number(m[2]), offset: m[4] ? Number(m[4]) : 0 });
+  }
+  return out;
+}
+
+/** The display rows for a double-dummy table.
+ *
+ *  `ddtricks` is the 20-character string (rows N, S, E, W; strains NT, S, H, D,
+ *  C). `table` and `bba` are contracts as ddContractFromResult returns them, or
+ *  null. `par` is the deal's par_contract string. Returns rows of
+ *  { seat, cells: [{ tricks, colour: 'green'|'pink'|null, isTable, isBba, isPar }] }
+ *  in columns C, D, H, S, NT, or null for a missing table. */
+function ddDisplayRows(ddtricks, { table = null, bba = null, par = null } = {}) {
+  if (typeof ddtricks !== 'string' || ddtricks.length < 20) return null;
+  const agree = !!(table && bba && table.seat === bba.seat && table.strain === bba.strain);
+  const tricksAt = (si, col) => ddTrickValue(ddtricks[si * 5 + DD_STRING_COL[col]]);
+
+  // A par contract is bold only on the seats that make it: "NS 5H" when only
+  // North takes 11 is North's par, not South's. If no seat makes it (the par and
+  // the table disagree), fall back to the whole side.
+  const parCells = new Set();
+  for (const p of ddParseParContracts(par)) {
+    const need = p.level + 6 + p.offset;
+    const makers = p.seats.filter(s => tricksAt(DD_SEATS.indexOf(s), p.strain) >= need);
+    for (const s of (makers.length ? makers : p.seats)) parCells.add(`${s}${p.strain}`);
+  }
+
+  const rows = DD_SEATS.map((seat, si) => ({
+    seat,
+    cells: [0, 1, 2, 3, 4].map(col => {
+      const isTable = !!table && table.seat === seat && table.strain === col;
+      const isBba = !!bba && bba.seat === seat && bba.strain === col;
+      let colour = null;
+      if (isTable) colour = (!bba || agree) ? 'green' : 'pink';
+      else if (isBba) colour = 'green';
+      return { tricks: tricksAt(si, col), colour, isTable, isBba,
+               isPar: parCells.has(`${seat}${col}`) };
+    }),
+  }));
+  return ddCollapseRows(rows);
+}
+
+/** Merge N+S into NS and E+W into EW when every cell's tricks match and no cell
+ *  would carry both colours. The marks survive as the OR of the pair. */
+function ddCollapseRows(rows) {
+  const bySeat = Object.fromEntries(rows.map(r => [r.seat, r]));
+  const mergeable = (a, b) => a.cells.every((c, i) => {
+    const d = b.cells[i];
+    return c.tricks === d.tricks && !(c.colour && d.colour && c.colour !== d.colour);
+  });
+  const out = [];
+  for (const [x, y] of [['N', 'S'], ['E', 'W']]) {
+    const a = bySeat[x], b = bySeat[y];
+    if (mergeable(a, b)) {
+      out.push({ seat: x + y, cells: a.cells.map((c, i) => {
+        const d = b.cells[i];
+        return { tricks: c.tricks, colour: c.colour || d.colour, isTable: c.isTable || d.isTable,
+                 isBba: c.isBba || d.isBba, isPar: c.isPar || d.isPar };
+      }) });
+    } else {
+      out.push(a, b);
+    }
+  }
+  return out;
+}
+
+/** "3♠ by East", "4♥X by North". */
+function ddContractName(c) {
+  return `${c.level}${DD_GLYPHS[c.strain]}${c.doubled || ''} by ${DD_SEAT_NAMES[c.seat]}`;
+}
+
+/** How a contract fares on `tricks`: "makes exactly", "makes with 2 over", "down 1". */
+function ddOutcome(c, tricks) {
+  const diff = tricks - (c.level + 6);
+  if (diff === 0) return 'makes exactly';
+  return diff > 0 ? `makes with ${diff} over` : `down ${-diff}`;
+}
+
+/** A cell's tooltip: the tricks, then what its colour and weight mean. */
+function ddCellTitle(seat, col, cell, { table = null, bba = null } = {}) {
+  const who = DD_SEAT_NAMES[seat] || seat;
+  const lines = [`${who} ${seat.length > 1 ? 'take' : 'takes'} ${cell.tricks} tricks in ${DD_STRAIN_WORDS[col]}`];
+  if (cell.isTable && table) {
+    const what = `${ddContractName(table)}, ${ddOutcome(table, cell.tricks)} on best play`;
+    if (cell.colour === 'pink') lines.push(`Pink: played at this table, ${what}. BBA bid ${ddContractName(bba)}.`);
+    else if (cell.isBba) lines.push(`Green: played at this table and bid by BBA, ${what}.`);
+    else lines.push(`Green: played at this table, ${what}.`);
+  }
+  if (cell.isBba && bba && !cell.isTable) {
+    lines.push(`Green: BBA's contract, ${ddContractName(bba)}, ${ddOutcome(bba, cell.tricks)} on best play.`);
+  }
+  if (cell.isPar) lines.push('Bold: par.');
+  return lines.join('\n');
+}
+
 // ---- Node export ----
 //
 // Browsers never see this: `module` is undefined there, so the engine simply
@@ -1291,5 +1439,7 @@ if (typeof module !== 'undefined' && module.exports) {
     // shaping
     handToPBN, dealToPBN, renderParDisplayJS, buildDealInfo, buildResultString,
     buildPlayerPBN, jsAnalyzePlayer, jsAnalyzeBoard,
+    // double-dummy table display
+    ddContractFromResult, ddParseParContracts, ddDisplayRows, ddCellTitle,
   };
 }
